@@ -3,134 +3,110 @@ const bodyParser = require('body-parser');
 const { Pool } = require('pg');
 
 const app = express();
+const port = process.env.PORT || 3000;
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-// PostgreSQL Connection Pool
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Auto-create database tables on server launch
-const initDb = async () => {
+app.get('/', (req, res) => {
+  res.send('SmartFarmer USSD Gateway is Online!');
+});
+
+app.post('/ussd', async (req, res) => {
+  let { sessionId, serviceCode, phoneNumber, text } = req.body;
+  text = text || '';
+
+  let response = '';
+  const textArray = text.split('*');
+  const userOption = textArray[0];
+
+  try {
+    if (text === '') {
+      response = `CON Welcome to SmartFarmer E-Voucher System
+1. Check Voucher Balance
+2. Redeem Voucher
+3. Register Farmer`;
+    } 
+    else if (userOption === '1') {
+      response = `END Your active voucher balance is KES 5,000 for Fertilizer Subsidy.`;
+    } 
+    else if (userOption === '2') {
+      if (textArray.length === 1) {
+        response = `CON Enter Voucher Code:`;
+      } else if (textArray.length === 2) {
+        response = `CON Enter Agro-Dealer PIN:`;
+      } else if (textArray.length === 3) {
+        const voucherCode = textArray[1];
+        const dealerPin = textArray[2];
+
+        const result = await pool.query(
+          'SELECT * FROM vouchers WHERE code = $1 AND status = $2', 
+          [voucherCode, 'ACTIVE']
+        );
+
+        if (result.rows.length > 0) {
+          await pool.query(
+            'UPDATE vouchers SET status = $1 WHERE code = $2',
+            ['REDEEMED', voucherCode]
+          );
+          response = `END Success! Voucher ${voucherCode} redeemed for KES 5,000.`;
+        } else {
+          response = `END Invalid or already redeemed voucher code: ${voucherCode}.`;
+        }
+      }
+    } 
+    else if (userOption === '3') {
+      if (textArray.length === 1) {
+        response = `CON Enter National ID Number:`;
+      } else if (textArray.length === 2) {
+        const nationalId = textArray[1];
+
+        await pool.query(
+          'INSERT INTO farmers (phone_number, national_id) VALUES ($1, $2) ON CONFLICT (phone_number) DO NOTHING',
+          [phoneNumber, nationalId]
+        );
+
+        response = `END Thank you! ID ${nationalId} has been registered to ${phoneNumber}.`;
+      }
+    } 
+    else {
+      response = `END Invalid menu option. Please try again.`;
+    }
+  } catch (err) {
+    console.error('USSD Database Error:', err);
+    response = `END Service temporary unavailable. Please try again later.`;
+  }
+
+  res.set('Content-Type', 'text/plain');
+  res.send(response);
+});
+
+app.listen(port, async () => {
+  console.log(`Server listening on port ${port}`);
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS farmers (
         id SERIAL PRIMARY KEY,
-        national_id VARCHAR(50) UNIQUE NOT NULL,
-        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        phone_number VARCHAR(20) UNIQUE NOT NULL,
+        national_id VARCHAR(50) NOT NULL
       );
-
       CREATE TABLE IF NOT EXISTS vouchers (
         id SERIAL PRIMARY KEY,
         code VARCHAR(50) UNIQUE NOT NULL,
-        item VARCHAR(100) NOT NULL,
-        is_redeemed BOOLEAN DEFAULT FALSE,
-        redeemed_at TIMESTAMP
+        status VARCHAR(20) DEFAULT 'ACTIVE'
       );
-
-      INSERT INTO vouchers (code, item) 
-      VALUES ('VOUCH-5465', '50kg NPK Fertilizer'), ('VOUCH-9921', '10kg Certified Maize Seed')
+      INSERT INTO vouchers (code, status) 
+      VALUES ('VOUCH-5465', 'ACTIVE') 
       ON CONFLICT (code) DO NOTHING;
     `);
-    console.log('Database tables initialized successfully!');
+    console.log('Database tables ready!');
   } catch (err) {
-    console.error('Error initializing database:', err);
+    console.error('Database initialization failed:', err);
   }
-};
-initDb();
-
-// USSD Callback Endpoint
-app.post('/ussd', async (req, res) => {
-  const { text } = req.body;
-  let ussdResponse = '';
-  const textArray = (text || '').split('*');
-
-  try {
-    // Main Menu
-    if (text === '' || !text) {
-      ussdResponse = `CON Welcome to SmartFarmer E-Voucher Gateway
-1. Check My Subsidy Balance
-2. Redeem Voucher at Agro-Dealer
-3. Register New Farmer`;
-    } 
-
-    // Option 1: Balance Check
-    else if (text === '1') {
-      ussdResponse = `END SmartFarmer E-Voucher Status:
-Allocated: 1x 50kg NPK Fertilizer
-Status: READY FOR PICKUP at registered ward dealer.`;
-    } 
-
-    // Option 2: Redeem Voucher
-    else if (text === '2') {
-      ussdResponse = `CON Enter your E-Voucher Code (e.g. VOUCH-5465):`;
-    } 
-    else if (textArray[0] === '2' && textArray.length === 2) {
-      const voucherCode = textArray[1].trim().toUpperCase();
-      
-      const vResult = await pool.query('SELECT * FROM vouchers WHERE code = $1', [voucherCode]);
-
-      if (vResult.rows.length === 0) {
-        ussdResponse = `END Voucher ${voucherCode} not found in system.`;
-      } else if (vResult.rows[0].is_redeemed) {
-        ussdResponse = `END ALREADY REDEEMED! Voucher ${voucherCode} was already used.`;
-      } else {
-        ussdResponse = `CON Voucher ${voucherCode} Valid!
-Item: ${vResult.rows[0].item}
-Enter 4-Digit Agro-Dealer PIN:`;
-      }
-    } 
-    else if (textArray[0] === '2' && textArray.length === 3) {
-      const voucherCode = textArray[1].trim().toUpperCase();
-      const dealerPin = textArray[2].trim();
-
-      if (dealerPin === '1234') {
-        const updateRes = await pool.query(
-          'UPDATE vouchers SET is_redeemed = TRUE, redeemed_at = NOW() WHERE code = $1 AND is_redeemed = FALSE RETURNING *',
-          [voucherCode]
-        );
-
-        if (updateRes.rows.length > 0) {
-          ussdResponse = `END SUCCESS!
-Voucher ${voucherCode} REDEEMED & SAVED IN DB.
-Agro-Dealer authorized to release goods.`;
-        } else {
-          ussdResponse = `END Redemption Failed: Voucher already redeemed or invalid.`;
-        }
-      } else {
-        ussdResponse = `END Authorization Failed: Incorrect Agro-Dealer PIN.`;
-      }
-    } 
-
-    // Option 3: Register Farmer (Saved to Postgres)
-    else if (text === '3') {
-      ussdResponse = `CON Enter your National ID Number for Ward Verification:`;
-    } 
-    else if (textArray[0] === '3' && textArray.length === 2) {
-      const idNumber = textArray[1].trim();
-      
-      await pool.query(
-        'INSERT INTO farmers (national_id) VALUES ($1) ON CONFLICT (national_id) DO NOTHING',
-        [idNumber]
-      );
-
-      ussdResponse = `END Registration Saved! National ID ${idNumber} recorded permanently in SmartFarmer Database.`;
-    } 
-
-    else {
-      ussdResponse = `END Invalid selection. Please try again.`;
-    }
-  } catch (err) {
-    console.error('USSD Database Error:', err);
-    ussdResponse = `END System Error. Please try again later.`;
-  }
-
-  res.set('Content-Type', 'text/plain');
-  res.send(ussdResponse);
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-  
+        
