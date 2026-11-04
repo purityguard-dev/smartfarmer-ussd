@@ -14,9 +14,10 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Initialize Database Tables safely
+// Initialize Database Tables & Migrations safely
 async function initDb() {
   try {
+    // 1. Ensure farmers table & all columns exist
     await pool.query(`
       CREATE TABLE IF NOT EXISTS farmers (
         id SERIAL PRIMARY KEY,
@@ -27,7 +28,16 @@ async function initDb() {
         registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    
+    // Add missing columns to farmers if older table version exists
+    await pool.query(`
+      ALTER TABLE farmers ADD COLUMN IF NOT EXISTS phone_number VARCHAR(50) UNIQUE;
+      ALTER TABLE farmers ADD COLUMN IF NOT EXISTS name VARCHAR(100);
+      ALTER TABLE farmers ADD COLUMN IF NOT EXISTS national_id VARCHAR(50);
+      ALTER TABLE farmers ADD COLUMN IF NOT EXISTS location VARCHAR(100);
+    `);
 
+    // 2. Ensure vouchers table & all columns exist
     await pool.query(`
       CREATE TABLE IF NOT EXISTS vouchers (
         id SERIAL PRIMARY KEY,
@@ -38,10 +48,14 @@ async function initDb() {
       );
     `);
 
+    // Add missing columns to vouchers if older table version exists
     await pool.query(`
+      ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS code VARCHAR(50) UNIQUE;
+      ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS amount DECIMAL(10, 2) DEFAULT 500.00;
       ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'ACTIVE';
     `);
 
+    // 3. Insert default test vouchers if table is empty
     const voucherCheck = await pool.query('SELECT COUNT(*) FROM vouchers');
     if (parseInt(voucherCheck.rows[0].count) === 0) {
       await pool.query(`
@@ -52,7 +66,7 @@ async function initDb() {
       `);
     }
 
-    console.log('Database initialized successfully.');
+    console.log('Database initialized and columns migrated successfully.');
   } catch (err) {
     console.error('Database initialization error:', err.message);
   }
@@ -63,23 +77,20 @@ initDb();
 // USSD Endpoint
 app.post('/ussd', async (req, res) => {
   res.set('Content-Type', 'text/plain');
-  
+
   try {
     const { sessionId, serviceCode, phoneNumber, text } = req.body;
     let response = '';
 
-    // Clean and split text input
     const rawText = text ? text.trim() : '';
     const textArray = rawText.length > 0 ? rawText.split('*') : [];
 
     if (rawText === '') {
-      // Main Menu
       response = `CON Welcome to SmartFarmer Kenya
 1. Register Farmer
 2. Check Voucher Status
 3. Redeem Voucher`;
     } 
-    // OPTION 1: Farmer Registration
     else if (textArray[0] === '1') {
       if (textArray.length === 1) {
         response = `CON Enter your Full Name:`;
@@ -100,11 +111,10 @@ app.post('/ussd', async (req, res) => {
            DO UPDATE SET name = $2, national_id = $3, location = $4`,
           [phone, name, nationalId, location]
         );
-        
+
         response = `END Registration successful!\nWelcome to SmartFarmer, ${name}.`;
       }
     } 
-    // OPTION 2: Check Voucher Status
     else if (textArray[0] === '2') {
       const result = await pool.query(
         'SELECT code, amount, status FROM vouchers WHERE status = $1 LIMIT 1', 
@@ -118,7 +128,6 @@ app.post('/ussd', async (req, res) => {
         response = `END No active e-vouchers found for your account.`;
       }
     } 
-    // OPTION 3: Redeem Voucher
     else if (textArray[0] === '3') {
       if (textArray.length === 1) {
         response = `CON Enter Voucher Code to redeem:`;
@@ -145,7 +154,7 @@ app.post('/ussd', async (req, res) => {
 
     res.send(response);
   } catch (err) {
-    console.error('USSD Processing Error:', err);
+    console.error('USSD Processing Error:', err.message);
     res.send('END Technical error occurred. Please try again.');
   }
 });
@@ -153,3 +162,4 @@ app.post('/ussd', async (req, res) => {
 app.listen(port, () => {
   console.log(`SmartFarmer USSD Server running on port ${port}`);
 });
+  
