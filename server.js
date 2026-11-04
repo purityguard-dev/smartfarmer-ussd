@@ -17,11 +17,10 @@ const pool = new Pool({
 // Initialize Database Tables safely
 async function initDb() {
   try {
-    // Create Farmers Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS farmers (
         id SERIAL PRIMARY KEY,
-        phone_number VARCHAR(20) UNIQUE NOT NULL,
+        phone_number VARCHAR(50) UNIQUE NOT NULL,
         name VARCHAR(100),
         national_id VARCHAR(50),
         location VARCHAR(100),
@@ -29,7 +28,6 @@ async function initDb() {
       );
     `);
 
-    // Create Vouchers Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS vouchers (
         id SERIAL PRIMARY KEY,
@@ -40,12 +38,10 @@ async function initDb() {
       );
     `);
 
-    // Add status column dynamically if missing from older table versions
     await pool.query(`
       ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'ACTIVE';
     `);
 
-    // Insert dummy vouchers if empty
     const voucherCheck = await pool.query('SELECT COUNT(*) FROM vouchers');
     if (parseInt(voucherCheck.rows[0].count) === 0) {
       await pool.query(`
@@ -66,83 +62,94 @@ initDb();
 
 // USSD Endpoint
 app.post('/ussd', async (req, res) => {
-  const { sessionId, serviceCode, phoneNumber, text } = req.body;
-  let response = '';
+  res.set('Content-Type', 'text/plain');
+  
+  try {
+    const { sessionId, serviceCode, phoneNumber, text } = req.body;
+    let response = '';
 
-  const textArray = text ? text.split('*') : [];
+    // Clean and split text input
+    const rawText = text ? text.trim() : '';
+    const textArray = rawText.length > 0 ? rawText.split('*') : [];
 
-  if (text === '') {
-    response = `CON Welcome to SmartFarmer Kenya
+    if (rawText === '') {
+      // Main Menu
+      response = `CON Welcome to SmartFarmer Kenya
 1. Register Farmer
 2. Check Voucher Status
 3. Redeem Voucher`;
-  } else if (textArray[0] === '1') {
-    if (textArray.length === 1) {
-      response = `CON Enter your Full Name:`;
-    } else if (textArray.length === 2) {
-      response = `CON Enter your National ID:`;
-    } else if (textArray.length === 3) {
-      response = `CON Enter your Location:`;
-    } else if (textArray.length === 4) {
-      const name = textArray[1];
-      const nationalId = textArray[2];
-      const location = textArray[3];
+    } 
+    // OPTION 1: Farmer Registration
+    else if (textArray[0] === '1') {
+      if (textArray.length === 1) {
+        response = `CON Enter your Full Name:`;
+      } else if (textArray.length === 2) {
+        response = `CON Enter your National ID:`;
+      } else if (textArray.length === 3) {
+        response = `CON Enter your Location:`;
+      } else if (textArray.length === 4) {
+        const name = textArray[1].trim();
+        const nationalId = textArray[2].trim();
+        const location = textArray[3].trim();
+        const phone = phoneNumber ? phoneNumber.trim() : 'UNKNOWN';
 
-      try {
         await pool.query(
           `INSERT INTO farmers (phone_number, name, national_id, location)
            VALUES ($1, $2, $3, $4)
-           ON CONFLICT (phone_number) DO UPDATE SET name = $2, national_id = $3, location = $4`,
-          [phoneNumber, name, nationalId, location]
+           ON CONFLICT (phone_number) 
+           DO UPDATE SET name = $2, national_id = $3, location = $4`,
+          [phone, name, nationalId, location]
         );
-        response = `END Registration successful! Welcome to SmartFarmer, ${name}.`;
-      } catch (err) {
-        console.error('Error saving farmer:', err.message);
-        response = `END Error completing registration. Please try again later.`;
+        
+        response = `END Registration successful!\nWelcome to SmartFarmer, ${name}.`;
       }
-    }
-  } else if (textArray[0] === '2') {
-    try {
-      const result = await pool.query('SELECT code, amount, status FROM vouchers WHERE status = $1 LIMIT 1', ['ACTIVE']);
+    } 
+    // OPTION 2: Check Voucher Status
+    else if (textArray[0] === '2') {
+      const result = await pool.query(
+        'SELECT code, amount, status FROM vouchers WHERE status = $1 LIMIT 1', 
+        ['ACTIVE']
+      );
+
       if (result.rows.length > 0) {
         const v = result.rows[0];
-        response = `END Active Voucher Found:
-Code: ${v.code}
-Amount: KES ${v.amount}`;
+        response = `END Active Voucher Found:\nCode: ${v.code}\nAmount: KES ${v.amount}`;
       } else {
         response = `END No active e-vouchers found for your account.`;
       }
-    } catch (err) {
-      console.error('Error checking voucher:', err.message);
-      response = `END Failed to retrieve voucher details.`;
-    }
-  } else if (textArray[0] === '3') {
-    if (textArray.length === 1) {
-      response = `CON Enter Voucher Code to redeem:`;
-    } else if (textArray.length === 2) {
-      const code = textArray[1];
-      try {
-        const resV = await pool.query('SELECT * FROM vouchers WHERE code = $1 AND status = $2', [code, 'ACTIVE']);
+    } 
+    // OPTION 3: Redeem Voucher
+    else if (textArray[0] === '3') {
+      if (textArray.length === 1) {
+        response = `CON Enter Voucher Code to redeem:`;
+      } else if (textArray.length === 2) {
+        const code = textArray[1].trim();
+        const resV = await pool.query(
+          'SELECT * FROM vouchers WHERE code = $1 AND status = $2', 
+          [code, 'ACTIVE']
+        );
+
         if (resV.rows.length > 0) {
-          await pool.query('UPDATE vouchers SET status = $1 WHERE code = $2', ['REDEEMED', code]);
+          await pool.query(
+            'UPDATE vouchers SET status = $1 WHERE code = $2', 
+            ['REDEEMED', code]
+          );
           response = `END Voucher ${code} redeemed successfully!`;
         } else {
           response = `END Invalid or already redeemed voucher code.`;
         }
-      } catch (err) {
-        console.error('Error redeeming voucher:', err.message);
-        response = `END Error redeeming voucher. Try again later.`;
       }
+    } else {
+      response = `END Invalid option. Please try again.`;
     }
-  } else {
-    response = `END Invalid option. Please try again.`;
-  }
 
-  res.set('Content-Type', 'text/plain');
-  res.send(response);
+    res.send(response);
+  } catch (err) {
+    console.error('USSD Processing Error:', err);
+    res.send('END Technical error occurred. Please try again.');
+  }
 });
 
 app.listen(port, () => {
   console.log(`SmartFarmer USSD Server running on port ${port}`);
 });
-                     
